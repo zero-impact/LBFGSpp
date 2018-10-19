@@ -7,7 +7,7 @@
 #include <Eigen/Core>
 #include "LBFGS/Param.h"
 #include "LBFGS/LineSearch.h"
-
+#include <SolverPardiso.h>
 
 namespace LBFGSpp {
 
@@ -48,7 +48,7 @@ private:
         if(m_param.past > 0)
             m_fx.resize(m_param.past);
     }
-
+    
 public:
     ///
     /// Constructor for LBFGS solver.
@@ -83,7 +83,7 @@ public:
         reset(n);
 
         // Evaluate function and compute gradient
-        fx = f(x, m_grad);
+        fx = f(x, m_grad, 0, 0);
         Scalar xnorm = x.norm();
         Scalar gnorm = m_grad.norm();
         if(fpast > 0)
@@ -109,7 +109,7 @@ public:
             m_gradp.noalias() = m_grad;
 
             // Line search to update x, fx and gradient
-            LineSearch<Scalar>::Backtracking(f, fx, x, m_grad, step, m_drt, m_xp, m_param);
+            LineSearch<Scalar>::Backtracking(f, fx, x, m_grad, step, m_drt, m_xp, m_param, k);
 
             // New x norm and gradient norm
             xnorm = x.norm();
@@ -123,7 +123,7 @@ public:
             // Convergence test -- objective function value
             if(fpast > 0)
             {
-                if(k >= fpast && std::abs((m_fx[k % fpast] - fx) / fx) < m_param.delta)
+                if(k >= fpast &&  std::abs((m_fx[k % fpast] - fx) / fx)  < m_param.delta)
                     return k;
 
                 m_fx[k % fpast] = fx;
@@ -162,6 +162,7 @@ public:
                 m_drt.noalias() -= m_alpha[j] * yj;
             }
 
+            //I think you are hitting H0 here so here we'd apply a prefactored hessian
             m_drt *= (ys / yy);
 
             for(int i = 0; i < bound; i++)
@@ -180,6 +181,134 @@ public:
 
         return k;
     }
+    
+    ///
+    /// Minimizing a multivariate function using LBFGS algorithm.
+    /// Exceptions will be thrown if error occurs.
+    ///
+    /// \param f  A function object such that `f(x, grad)` returns the
+    ///           objective function value at `x`, and overwrites `grad` with
+    ///           the gradient.
+    /// \param x  In: An initial guess of the optimal point. Out: The best point
+    ///           found.
+    /// \param fx Out: The objective function value at `x`.
+    ///
+    /// \return Number of iterations used.
+    ///
+    template <typename Foo, typename LLT>
+    inline int minimizeWithPreconditioner(Foo& f, Vector& x, Scalar& fx, LLT &llt)
+    {
+        const int n = x.size();
+        const int fpast = m_param.past;
+        reset(n);
+        
+        // Evaluate function and compute gradient
+        fx = f(x, m_grad, 0, 0);
+        Scalar xnorm = x.norm();
+        Scalar gnorm = m_grad.norm();
+        if(fpast > 0)
+            m_fx[0] = fx;
+        
+        // Early exit if the initial x is already a minimizer
+        if(gnorm <= m_param.epsilon * std::max(xnorm, Scalar(1.0)))
+        {
+            return 1;
+        }
+        
+        // Initial direction
+        
+        m_drt.noalias() = -m_grad;
+        m_drt = llt.solve(m_drt);
+        
+        // Initial step
+        Scalar step = Scalar(1.0);
+        
+        // auto preconditioner_llt = preconditioner.llt();
+        
+        int k = 1;
+        int end = 0;
+        for( ; ; )
+        {
+            // Save the curent x and gradient
+            m_xp.noalias() = x;
+            m_gradp.noalias() = m_grad;
+            
+            // Line search to update x, fx and gradient
+            LineSearch<Scalar>::Backtracking(f, fx, x, m_grad, step, m_drt, m_xp, m_param, k);
+            
+            // New x norm and gradient norm
+            xnorm = x.norm();
+            gnorm = m_grad.norm();
+            
+            // Convergence test -- gradient
+            if(gnorm <= m_param.epsilon * std::max(xnorm, Scalar(1.0)))
+            {
+                return k;
+            }
+            // Convergence test -- objective function value
+            if(fpast > 0)
+            {
+                if(k >= fpast && (m_fx[k % fpast] - fx)  < m_param.delta)
+                    return k;
+                
+                m_fx[k % fpast] = fx;
+            }
+            // Maximum number of iterations
+            if(m_param.max_iterations != 0 && k >= m_param.max_iterations)
+            {
+                return k;
+            }
+            
+            // Update s and y
+            // s_{k+1} = x_{k+1} - x_k
+            // y_{k+1} = g_{k+1} - g_k
+            MapVec svec(&m_s(0, end), n);
+            MapVec yvec(&m_y(0, end), n);
+            svec.noalias() = x - m_xp;
+            yvec.noalias() = m_grad - m_gradp;
+            
+            // ys = y's = 1/rho
+            // yy = y'y
+            Scalar ys = yvec.dot(svec);
+            Scalar yy = yvec.squaredNorm();
+            m_ys[end] = ys;
+            
+            // Recursive formula to compute d = -H * g
+            m_drt.noalias() = -m_grad;
+            int bound = std::min(m_param.m, k);
+            end = (end + 1) % m_param.m;
+            int j = end;
+            for(int i = 0; i < bound; i++)
+            {
+                j = (j + m_param.m - 1) % m_param.m;
+                MapVec sj(&m_s(0, j), n);
+                MapVec yj(&m_y(0, j), n);
+                m_alpha[j] = sj.dot(m_drt) / m_ys[j];
+                m_drt.noalias() -= m_alpha[j] * yj;
+            }
+            
+            //I think you are hitting H0 here so here we'd apply a prefactored hessian
+            // m_drt *= (ys / yy);
+            m_drt = llt.solve(m_drt);
+            // m_drt *= (ys / yy);
+            
+            for(int i = 0; i < bound; i++)
+            {
+                MapVec sj(&m_s(0, j), n);
+                MapVec yj(&m_y(0, j), n);
+                Scalar beta = yj.dot(m_drt) / m_ys[j];
+                m_drt.noalias() += (m_alpha[j] - beta) * sj;
+                j = (j + 1) % m_param.m;
+            }
+            
+            // step = 1.0 as initial guess
+            step = Scalar(1.0);
+            k++;
+        }
+        
+        return k;
+    }
+
 };
 
 

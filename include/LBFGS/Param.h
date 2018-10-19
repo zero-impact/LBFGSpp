@@ -183,7 +183,7 @@ public:
     {
         if(m <= 0)
             throw std::invalid_argument("'m' must be positive");
-        if(epsilon <= 0)
+        if(epsilon < 0)
             throw std::invalid_argument("'epsilon' must be positive");
         if(past < 0)
             throw std::invalid_argument("'past' must be non-negative");

@@ -41,7 +41,8 @@ public:
     static void Backtracking(Foo& f, Scalar& fx, Vector& x, Vector& grad,
                              Scalar& step,
                              const Vector& drt, const Vector& xp,
-                             const LBFGSParam<Scalar>& param)
+                             const LBFGSParam<Scalar>& param,
+                             const int k)
     {
         // Decreasing and increasing factors
         const Scalar dec = 0.5;
@@ -68,7 +69,7 @@ public:
             // x_{k+1} = x_k + step * d_k
             x.noalias() = xp + step * drt;
             // Evaluate this candidate
-            fx = f(x, grad);
+            fx = f(x, grad, k, iter);
 
             if(fx > fx_init + step * dg_test)
             {
